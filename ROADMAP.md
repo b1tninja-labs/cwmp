@@ -11,23 +11,27 @@ behaviour regressed. Reading the code and agreeing with it is not enough. That i
 Legend: `[ok]` implemented and pinned by a named test -- `[part]` partial, with what is
 missing stated -- `[ ]` not implemented -- `[no]` deliberate non-goal.
 
+A Where cell marked `(to be written)` names the test that will pin the row once it exists; no
+such test has been written yet, and the row cannot leave `[ ]` until it has. The Milestone
+column places the row on the ladder in section 2, and `-` means it is not placed yet.
+
 Update the affected row in the same commit that changes the behaviour. A row and its test
 drift apart within one release, and the document becomes useless exactly when it is needed.
 
 ## 1. Obligations
 
-| Obligation | Spec | Status | Where |
-|---|---|---|---|
-| `envelope.encode_envelope()` | TR-069 Annex 2 | `[ ]` | `tests/test_obligations.py::encode_envelope` |
-| `envelope.decode_envelope()` | TR-069 Annex 2 | `[ ]` | `tests/test_obligations.py::decode_envelope` |
-| `methods.build_inform()` | TR-069 | `[ ]` | `tests/test_obligations.py::build_inform` |
-| `methods.set_parameter_values()` | TR-069 | `[ ]` | `tests/test_obligations.py::set_parameter_values` |
-| `session.handle_session()` | TR-069, RFC 9110 | `[ ]` | `tests/test_obligations.py::handle_session` |
-| `endpoint.run_inform()` | TR-069 | `[ ]` | `tests/test_obligations.py::run_inform` |
-| `datamodel.resolve_path()` | TR-181 | `[ ]` | `tests/test_obligations.py::resolve_path` |
-| `datamodel.coerce_value()` | TR-181 | `[ ]` | `tests/test_obligations.py::coerce_value` |
-| `auth.digest_challenge()` | RFC 9110 | `[ ]` | `tests/test_obligations.py::digest_challenge` |
-| `transfer.build_download()` | TR-069 | `[ ]` | `tests/test_obligations.py::build_download` |
+| Obligation | Spec | Status | Where | Milestone |
+|---|---|---|---|---|
+| `envelope.encode_envelope()` | TR-069 Annex 2 | `[ ]` | `tests/test_obligations.py::test_encode_envelope` (to be written) | M1 |
+| `envelope.decode_envelope()` | TR-069 Annex 2 | `[ ]` | `tests/test_obligations.py::test_decode_envelope` (to be written) | M1 |
+| `methods.build_inform()` | TR-069 | `[ ]` | `tests/test_obligations.py::test_build_inform` (to be written) | M2 |
+| `methods.set_parameter_values()` | TR-069 | `[ ]` | `tests/test_obligations.py::test_set_parameter_values` (to be written) | M2 |
+| `session.handle_session()` | TR-069, RFC 9110 | `[ ]` | `tests/test_obligations.py::test_handle_session` (to be written) | M3 |
+| `endpoint.run_inform()` | TR-069 | `[ ]` | `tests/test_obligations.py::test_run_inform` (to be written) | M4 |
+| `datamodel.resolve_path()` | TR-181 | `[ ]` | `tests/test_obligations.py::test_resolve_path` (to be written) | M5 |
+| `datamodel.coerce_value()` | TR-181 | `[ ]` | `tests/test_obligations.py::test_coerce_value` (to be written) | M5 |
+| `auth.digest_challenge()` | RFC 7616 sec. 3.3 | `[ ]` | `tests/test_obligations.py::test_digest_challenge` (to be written) | M3 |
+| `transfer.build_download()` | TR-069 | `[ ]` | `tests/test_obligations.py::test_build_download` (to be written) | M6 |
 
 ## 2. Milestones
 
@@ -43,7 +47,8 @@ the code existing. Coverage in `pyproject.toml` ratchets in the same commit.
 
 ## 3. Errata watch
 
-- Outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- TR-069 is outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- RFC 7616 carries 1 verified erratum, 4495 (Editorial, sec. 3.9.1): the example password is "Circle of Life" with a lower-case o, which matters to anyone reproducing the sec. 3.9.1 example as a test vector.
 - The ACS URL a CPE learns usually arrives from DHCP option 43 or a DHCPv6 vendor option, so leasespy is the natural partner and the two must agree on the encoding.
 
 ## 4. Deliberate non-goals

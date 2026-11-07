@@ -25,11 +25,13 @@ and Windows, plus the suite under `python -O`.
 These are the points where a plausible-looking change makes the project wrong
 rather than merely incomplete.
 
-1. **Roadmap honesty.** Never change a `ROADMAP.md` row from `[ ]` to `[x]` unless
-   the test named in its `Evidence` cell exists and passes. `tests/test_roadmap_rows.py`
-   fails on any row that claims done without a named test, and that check is the
-   reason the roadmap can be trusted. Do not weaken it, skip it, or delete it to
-   get a green run.
+1. **Roadmap honesty.** Never change a `ROADMAP.md` row from `[ ]` to `[ok]` unless
+   the test named in its `Where` cell exists, passes, and would fail if the behaviour
+   regressed. A Where cell marked `(to be written)` names a test nobody has written:
+   write it, then drop the marker in the same commit that flips the row.
+   `tests/test_roadmap_rows.py` checks only that every row names a callable the
+   package defines; it cannot tell a passing test from a missing one, so this rule
+   is the check. Do not weaken that test, skip it, or delete it to get a green run.
 2. **No silent stubs.** Code that is not implemented raises `NotImplementedError`.
    Never return an empty value, an empty collection, or a result object that reports
    success. A protocol library that answers nothing is worse than one that refuses
@@ -46,7 +48,8 @@ rather than merely incomplete.
 
 ## Read before implementing
 
-- Outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- TR-069 is outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- RFC 7616 carries 1 verified erratum, 4495 (Editorial, sec. 3.9.1): the example password is "Circle of Life" with a lower-case o, which matters to anyone reproducing the sec. 3.9.1 example as a test vector.
 - The ACS URL a CPE learns usually arrives from DHCP option 43 or a DHCPv6 vendor option, so leasespy is the natural partner and the two must agree on the encoding.
 
 ## Protocol work

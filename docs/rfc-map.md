@@ -8,6 +8,7 @@
 | TR-069 Annex 2 (SOAP) | Broadband Forum | - | 2026-11-05 |
 | TR-369 (USP) | Broadband Forum | - | 2026-11-05 |
 | RFC 9110 | Internet Standard (STD 97) | 2022-06 | 2026-11-05 |
+| RFC 7616 | Proposed Standard | 2015-09 | 2026-11-05 |
 
 Citation rules, in the order they most often get broken:
 

@@ -48,10 +48,12 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 | TR-069 Annex 2 (SOAP) | Broadband Forum | - | the envelope and encoding rules the RPC layer obeys |
 | TR-369 (USP) | Broadband Forum | - | the WebSocket successor; a roadmap target, not a first release |
 | RFC 9110 | Internet Standard (STD 97) | 2022-06 | HTTP semantics under the transport, including authentication |
+| RFC 7616 | Proposed Standard | 2015-09 | HTTP Digest access authentication, which obsoletes RFC 2617 |
 
 ### Errata watch
 
-- Outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- TR-069 is outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.
+- RFC 7616 carries 1 verified erratum, 4495 (Editorial, sec. 3.9.1): the example password is "Circle of Life" with a lower-case o, which matters to anyone reproducing the sec. 3.9.1 example as a test vector.
 - The ACS URL a CPE learns usually arrives from DHCP option 43 or a DHCPv6 vendor option, so leasespy is the natural partner and the two must agree on the encoding.
 
 ## Module layout
@@ -63,7 +65,7 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 | `session` | ACS session state, authentication and fault handling (TR-069) |
 | `endpoint` | CPE side: inform, connection request, method dispatch (TR-069) |
 | `datamodel` | object tree, parameter paths, types and constraints (TR-181, TR-098) |
-| `auth` | HTTP Digest challenge and response (RFC 9110, TR-069) |
+| `auth` | HTTP Digest challenge and response (RFC 7616, TR-069) |
 | `transfer` | TransferFile, Download and Upload with resumable semantics (TR-069) |
 | `clock` | periodic inform, session timeout and connection request retry |
 
@@ -77,7 +79,8 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 ## Install
 
 ```bash
-git clone https://github.com/b1tninja/cwmp.cd cwmp
+git clone https://github.com/b1tninja/cwmp.git
+cd cwmp
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\\Scripts\\Activate.ps1
 pip install -e ".[dev]"

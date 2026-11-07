@@ -56,6 +56,7 @@ with their line ranges.
 - TR-069 Annex 2 (SOAP) (Broadband Forum, -)
 - TR-369 (USP) (Broadband Forum, -)
 - RFC 9110 (Internet Standard (STD 97), 2022-06)
+- RFC 7616 (Proposed Standard, 2015-09)
 
 ## Traps that have already bitten this portfolio
 
