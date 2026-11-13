@@ -20,22 +20,30 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .envelope import Arg, Rpc
-from .errors import EncodeError
+from . import faults
+from .envelope import DEFAULT_CWMP_NS, Arg, Envelope, Fault, Rpc
+from .errors import EncodeError, EnvelopeError
+from .instances import ParameterInfo, ParameterNamesError, get_parameter_names
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
+    from .instances import InstanceTree
+
 __all__ = [
     "DeviceId",
     "Event",
     "ParameterValue",
+    "answer_get_parameter_names",
     "build_inform",
     "device_id_arg",
     "event_array_arg",
+    "get_parameter_names_request",
+    "get_parameter_names_response",
     "inform_response",
     "parameter_list_arg",
+    "parse_get_parameter_names",
     "set_parameter_values",
 ]
 
@@ -169,6 +177,83 @@ def inform_response() -> Rpc:
     """The InformResponse (Table 38): MaxEnvelopes is 1 because this version of the protocol carries one
     envelope per message (TR-069 Amendment 6 Corrigendum 1, A.3.3.1)."""
     return Rpc("InformResponse", (Arg("MaxEnvelopes", "1"),))
+
+
+def get_parameter_names_request(path: str, next_level: bool) -> Rpc:
+    """The GetParameterNames request (TR-069 Amendment 6 Corrigendum 1, A.3.2.3, Table 20): ``ParameterPath``
+    (string(256), empty for the top of the hierarchy) and ``NextLevel`` (boolean)."""
+    return Rpc(
+        "GetParameterNames",
+        (
+            Arg("ParameterPath", _limited(path, 256, "ParameterPath"), xsi_type="xsd:string"),
+            Arg("NextLevel", "1" if next_level else "0", xsi_type="xsd:boolean"),
+        ),
+    )
+
+
+def get_parameter_names_response(infos: Sequence[ParameterInfo]) -> Rpc:
+    """The GetParameterNamesResponse (Tables 21 and 22): an array of ``ParameterInfoStruct`` holding ``Name``
+    (string(256)) and ``Writable`` (boolean)."""
+    members = tuple(
+        Arg(
+            "ParameterInfoStruct",
+            children=(
+                Arg("Name", _limited(i.name, 256, "Name")),
+                Arg("Writable", "1" if i.writable else "0"),
+            ),
+        )
+        for i in infos
+    )
+    return Rpc(
+        "GetParameterNamesResponse",
+        (Arg("ParameterList", children=members, array_type="cwmp:ParameterInfoStruct"),),
+    )
+
+
+def parse_get_parameter_names(request: Envelope) -> tuple[str, bool]:
+    """``(ParameterPath, NextLevel)`` of a decoded GetParameterNames request; :class:`EnvelopeError` when the
+    method is another one or an argument is missing, repeated or not a boolean (Table 20)."""
+    if request.method != "GetParameterNames":
+        raise EnvelopeError(f"not a GetParameterNames request: {request.method[:40]}")
+    names = [c.tag for c in request.body]
+    if names != ["ParameterPath", "NextLevel"]:
+        raise EnvelopeError("GetParameterNames takes ParameterPath then NextLevel (Table 20)")
+    path = (request.body[0].text or "").strip()
+    flag = (request.body[1].text or "").strip()
+    if flag not in ("0", "1", "true", "false"):
+        raise EnvelopeError("NextLevel is not a boolean")
+    if len(path) > 256:
+        raise EnvelopeError("ParameterPath is string(256)")
+    return path, flag in ("1", "true")
+
+
+def answer_get_parameter_names(
+    tree: InstanceTree,
+    path: str,
+    next_level: bool,
+    *,
+    max_parameters: int | None = None,
+    namespace: str = DEFAULT_CWMP_NS,
+) -> Rpc | Fault:
+    """What a CPE answers a GetParameterNames with: the response, or the CPE fault the request earns.
+
+    Fault 9005 is an invalid ParameterPath and 9003 is NextLevel true with a parameter name (A.3.2.3, after
+    Table 22). 9004 (Resources Exceeded) is returned only when ``max_parameters`` is given, the answer is longer
+    and NextLevel is false: the report forbids it with NextLevel true. Each fault carries the SOAP Type of
+    Table 87 as its faultcode and the library's short name as FaultString.
+    """
+
+    def refuse(code: int) -> Fault:
+        entry = faults.CPE_FAULTS[code]
+        return Fault(code, entry.name, (), "SOAP-ENV:" + entry.kind, namespace)
+
+    try:
+        infos = get_parameter_names(tree, path, next_level)
+    except ParameterNamesError as error:
+        return refuse(error.fault_code)
+    if max_parameters is not None and not next_level and len(infos) > max_parameters:
+        return refuse(9004)
+    return get_parameter_names_response(infos)
 
 
 def set_parameter_values(params: dict) -> Rpc:

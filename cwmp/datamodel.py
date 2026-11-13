@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import base64
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
+from urllib.parse import unquote
 
 from devicespy import xmlsafe
 
@@ -45,18 +46,21 @@ __all__ = [
     "UNKNOWN_TIME",
     "CoerceError",
     "DataModel",
+    "InstanceRef",
     "ObjectDef",
     "ParameterDef",
     "PathError",
     "PathRef",
     "Resolved",
     "Syntax",
+    "check_derivation",
     "children",
     "coerce_value",
     "load_model",
     "reference_path",
     "resolve_path",
     "resolve_syntax",
+    "split_list",
 ]
 
 MAX_MODEL_BYTES = 16 * 1024 * 1024
@@ -109,6 +113,18 @@ class PathRef:
 
 
 @dataclass(frozen=True)
+class InstanceRef:
+    """An ``instanceRef`` facet (TR-106 A.2.3.7, Table 7): the value is the Instance Number of a row of the table
+    ``target_parent`` names (no ``{i}`` and no instance identifiers), read in ``target_parent_scope`` (``normal``,
+    ``model`` or ``object``, A.2.3.4); ``ref_type`` is ``weak`` or ``strong`` (A.2.3.6). The null reference is 0
+    for unsignedInt and -1 for int (A.2.3.5)."""
+
+    target_parent: str = ""
+    target_parent_scope: str = "normal"
+    ref_type: str = "weak"
+
+
+@dataclass(frozen=True)
 class Syntax:
     """A parameter's type as the data model writes it: ``base`` is a simple type name or the name of a
     ``dataType``; ``is_list`` marks a list-valued parameter; the restrictions are the model's own.
@@ -144,6 +160,10 @@ class Syntax:
     enumeration_target_scope: str = "normal"
     enumeration_null: str | None = None
     path_ref: PathRef | None = None
+    nested_brackets: str | None = None
+    """The ``list`` element's ``nestedBrackets`` attribute (A.2.3.1, A.2.7.1): ``required`` says an item that is
+    itself a list is written in square brackets (3.2.2)."""
+    instance_ref: InstanceRef | None = None
 
 
 @dataclass(frozen=True)
@@ -239,6 +259,16 @@ def _path_ref(element: ET.Element | None) -> PathRef | None:
     )
 
 
+def _instance_ref(element: ET.Element | None) -> InstanceRef | None:
+    if element is None:
+        return None
+    return InstanceRef(
+        (element.get("targetParent") or "").strip(),
+        element.get("targetParentScope") or "normal",
+        element.get("refType") or "weak",
+    )
+
+
 def _type_syntax(syntax: ET.Element) -> Syntax | None:
     """The type held by a ``syntax`` element, or by a ``dataType`` element, which holds it directly.
 
@@ -297,6 +327,8 @@ def _type_syntax(syntax: ET.Element) -> Syntax | None:
         (reference.get("targetParamScope") or "normal") if reference is not None else "normal",
         reference.get("nullValue") if reference is not None else None,
         _path_ref(next((c for c in holder if c.tag == "pathRef"), None)),
+        list_element.get("nestedBrackets") if list_element is not None else None,
+        _instance_ref(next((c for c in holder if c.tag == "instanceRef"), None)),
     )
 
 
@@ -623,6 +655,8 @@ def resolve_syntax(model: DataModel, syntax: Syntax) -> Syntax:
             else merged.enumeration_target_scope,
             derived.enumeration_null if derived.enumeration_ref else merged.enumeration_null,
             derived.path_ref or merged.path_ref,
+            derived.nested_brackets or merged.nested_brackets,
+            derived.instance_ref or merged.instance_ref,
         )
     return merged
 
@@ -766,6 +800,8 @@ def _item(syntax: Syntax, text: str, context: _Context) -> object:
         _check_enumeration_ref(syntax, text, context)
     if syntax.path_ref is not None and context.model is not None:
         _check_path_ref(syntax.path_ref, text, context)
+    if syntax.instance_ref is not None:
+        _check_instance_ref(syntax.instance_ref, typed, context)
     return typed
 
 
@@ -793,6 +829,120 @@ def _check_enumeration_ref(syntax: Syntax, text: str, context: _Context) -> None
         raise CoerceError(f"{target[:80]} holds the valid values and has no value to check against")
     if text not in current.split(","):
         raise CoerceError(f"{text[:40]!r} is not among the values of {target[:80]}")
+
+
+def _check_instance_ref(ref: InstanceRef, typed: object, context: _Context) -> None:
+    """An Instance Number against an ``instanceRef`` facet (TR-106 A.2.3.7, Table 7). A value that is not
+    the null reference (0 or -1, A.2.3.5) must be a positive Instance Number; for a strong reference, with the
+    parameter's own ``path`` and an ``instances`` tree, the row ``targetParent`` names must exist. A weak
+    reference is never checked for existence (A.2.3.6)."""
+    if not isinstance(typed, int) or isinstance(typed, bool):
+        raise CoerceError("an instanceRef value is an integer Instance Number")
+    if typed in (0, -1):
+        return
+    if typed < 1:
+        raise CoerceError(f"{typed} is not an Instance Number")
+    if ref.ref_type != "strong" or context.instances is None or context.path is None:
+        return
+    try:
+        table = reference_path(_object_of(context.path), ref.target_parent, ref.target_parent_scope)
+    except PathError as error:
+        raise CoerceError(
+            f"instanceRef targetParent {ref.target_parent!r}: {error.reason}"
+        ) from None
+    if not context.instances.exists(f"{table.rstrip('.')}.{typed}."):
+        raise CoerceError(
+            f"{table.rstrip('.')}.{typed}. is a strong reference to an instance that is absent"
+        )
+
+
+def split_list(text: str, *, nested_brackets: bool = False) -> list[str]:
+    """The items of a comma-separated list (TR-106 section 3.2.2): exactly one comma between items, whitespace
+    around it belonging to the separator, and with ``nested_brackets`` a ``[...]`` group kept whole (one level of
+    protection, which the caller removes). Raises :class:`CoerceError` for an unbalanced bracket, an empty
+    item between two commas, or a bracket inside an unprotected item. An empty string is an empty list."""
+    if text.strip() == "":
+        return []
+    items: list[str] = []
+    depth = 0
+    start = 0
+    for i, c in enumerate(text):
+        if nested_brackets and c == "[":
+            depth += 1
+        elif nested_brackets and c == "]":
+            depth -= 1
+            if depth < 0:
+                raise CoerceError("a closing bracket with no opening one in a list value")
+        elif c == "," and depth == 0:
+            items.append(text[start:i].strip())
+            start = i + 1
+    if depth != 0:
+        raise CoerceError("an opening bracket is never closed in a list value")
+    items.append(text[start:].strip())
+    return items
+
+
+_TARGET_TYPES = {  # targetType -> the types it allows (a derived type may only take a subset)
+    "any": {"parameter", "single", "table", "row"},
+    "parameter": {"parameter"},
+    "object": {"single", "table", "row"},
+    "single": {"single"},
+    "table": {"table"},
+    "row": {"row"},
+}
+
+
+def _covered(inner: tuple[Number | None, Number | None], outer: Sizes | tuple) -> bool:
+    low, high = inner
+    for o_low, o_high in outer:
+        if (o_low is None or (low is not None and low >= o_low)) and (
+            o_high is None or (high is not None and high <= o_high)
+        ):
+            return True
+    return False
+
+
+def check_derivation(model: DataModel) -> list[str]:
+    """The base type restriction of TR-106 A.2.3.8, Table 9, for the facets this reader holds: a derived
+    ``dataType`` must not permit a value its base forbids. Checked: ``size`` and ``range`` (each interval of the
+    derived type lies inside one interval of the base's, when the base states any), ``pathRef`` ``targetType``
+    (the derived set of targets is a subset) and ``targetParent`` (when the base lists parents, the derived
+    lists only some of them), and ``instanceRef`` ``targetParent`` unchanged. Not checked: ``enumeration`` and
+    ``pattern`` (their rules need the values' descriptions and a regular-expression subset test), ``status``
+    promotion and ``units``. Returns one sentence per violation, in the order of the model's ``dataType`` names;
+    an empty list means none was found. A derived type whose base is a built-in type is not a derivation."""
+    problems: list[str] = []
+    for name, derived in model.data_types.items():
+        base = model.data_types.get(derived.base)
+        if base is None:
+            continue
+        for what, d_items, b_items in (
+            ("size", derived.sizes, base.sizes),
+            ("range", derived.ranges, base.ranges),
+        ):
+            if b_items:
+                problems.extend(
+                    f"{name}: {what} {item} is outside the base type {derived.base}'s {what}"
+                    for item in d_items
+                    if not _covered(item, b_items)
+                )
+        if derived.path_ref and base.path_ref:
+            d, b = derived.path_ref, base.path_ref
+            if not _TARGET_TYPES.get(d.target_type, set()) <= _TARGET_TYPES.get(
+                b.target_type, set()
+            ):
+                problems.append(
+                    f"{name}: targetType {d.target_type} permits targets {b.target_type} of {derived.base} does not"
+                )
+            if b.target_parent and not set(d.target_parent) <= set(b.target_parent):
+                problems.append(f"{name}: targetParent is not narrower than {derived.base}'s")
+        if (
+            derived.instance_ref
+            and base.instance_ref
+            and derived.instance_ref.target_parent != base.instance_ref.target_parent
+        ):
+            problems.append(f"{name}: instanceRef targetParent differs from {derived.base}'s")
+    return problems
 
 
 def _template(path: str) -> str:
@@ -905,8 +1055,10 @@ def coerce_value(
     model of the right ``targetType`` and ``targetDataType``, and with the parameter's own instance ``path``
     also sit under a ``targetParent``; with ``instances`` a strong reference must name an instance that
     exists. An ``enumerationRef`` value is checked only when ``path`` and ``lookup`` (a function from a full
-    Path Name to that parameter's current value, or None) are both given. Not checked: ``instanceRef``, and
-    the "string defaults to 16 characters" rule, which Table 12 states for RPC arguments rather than
+    Path Name to that parameter's current value, or None) are both given. ``instanceRef`` is checked as
+    :func:`_check_instance_ref` says. A list whose ``nestedBrackets`` is ``required`` is split by
+    :func:`split_list`, and when its item type is itself a list each item (a ``[...]`` group, or a
+    percent-encoded one) is coerced as that list. Not checked: the "string defaults to 16 characters" rule, which Table 12 states for RPC arguments rather than
     data-model parameters. Raises :class:`CoerceError` for a value that does not fit and :class:`PathError` when a named type
     cannot be resolved.
     """
@@ -928,9 +1080,28 @@ def coerce_value(
         return _item(syntax, value, context)
     if not _in_sizes(len(value), syntax.list_sizes):
         raise CoerceError(f"a list value of {len(value)} characters is outside the list's size")
-    items = value.split(",") if value else []
+    brackets = syntax.nested_brackets == "required"
+    items = (
+        split_list(value, nested_brackets=brackets)
+        if brackets
+        else (value.split(",") if value else [])
+    )
     if syntax.min_items is not None and len(items) < syntax.min_items:
         raise CoerceError(f"a list of {len(items)} items is shorter than {syntax.min_items}")
     if syntax.max_items is not None and len(items) > syntax.max_items:
         raise CoerceError(f"a list of {len(items)} items is longer than {syntax.max_items}")
+    if brackets:
+        inner = model.data_types.get(parameter.syntax.base) if model and parameter.syntax else None
+        if inner is not None and inner.is_list:
+            return [
+                coerce_value(
+                    replace(parameter, syntax=inner),
+                    item[1:-1] if item.startswith("[") and item.endswith("]") else unquote(item),
+                    model=model,
+                    path=path,
+                    lookup=lookup,
+                    instances=instances,
+                )
+                for item in items
+            ]
     return [_item(syntax, item, context) for item in items]
