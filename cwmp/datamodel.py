@@ -35,6 +35,9 @@ from devicespy import xmlsafe
 
 if TYPE_CHECKING:
     import xml.etree.ElementTree as ET
+    from collections.abc import Callable
+
+    from .instances import InstanceTree
 
 __all__ = [
     "MAX_MODEL_BYTES",
@@ -45,11 +48,13 @@ __all__ = [
     "ObjectDef",
     "ParameterDef",
     "PathError",
+    "PathRef",
     "Resolved",
     "Syntax",
     "children",
     "coerce_value",
     "load_model",
+    "reference_path",
     "resolve_path",
     "resolve_syntax",
 ]
@@ -76,12 +81,31 @@ _SIMPLE_TYPES = frozenset(
 )
 
 
+Number = int | Decimal
+Sizes = tuple[tuple[int | None, int | None], ...]
+
+
 class PathError(ValueError):
     """A path name is malformed or does not address anything in the model; ``reason`` says why."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class PathRef:
+    """A ``pathRef`` facet (TR-106 A.2.3.7, Table 6): what a path-name value may reference. ``target_parent``
+    holds the Path Names (``{i}`` is a wildcard) whose immediate children may be referenced, empty meaning
+    anything, each read in ``target_parent_scope`` (``normal``, ``model``, ``object`` or ``absolute``, A.2.3.4);
+    ``target_type`` is ``any``, ``parameter``, ``object``, ``single``, ``table`` or ``row``; ``target_data_type``
+    limits a referenced parameter's type; ``ref_type`` is ``weak`` or ``strong`` (A.2.3.6)."""
+
+    target_parent: tuple[str, ...] = ()
+    target_parent_scope: str = "normal"
+    target_type: str = "any"
+    target_data_type: str = "any"
+    ref_type: str = "weak"
 
 
 @dataclass(frozen=True)
@@ -92,22 +116,34 @@ class Syntax:
     ``min_length``, ``max_length``, ``minimum`` and ``maximum`` are the first ``size`` and ``range`` the model
     gives; ``sizes`` and ``ranges`` hold every one (a type may allow several lengths). ``patterns`` are the
     alternatives a string must match, ``enumeration_ref`` says the values are listed in another parameter
-    (so no list is known here), ``min_items`` and ``max_items`` bound a list."""
+    (so no list is known here), ``min_items`` and ``max_items`` bound a list.
+
+    ``steps`` is the ``step`` of each range, parallel to ``ranges`` (None where the model gives none, which
+    means a step of 1). ``list_sizes`` is the ``size`` the model gives the list as a whole (TR-106 A.2.3.3,
+    A.2.7.1); ``sizes`` bounds the items. ``enumeration_target``, ``enumeration_target_scope`` and
+    ``enumeration_null`` are the ``enumerationRef`` facet's ``targetParam``, ``targetParamScope`` and
+    ``nullValue`` (Table 8); ``path_ref`` is the ``pathRef`` facet."""
 
     base: str
     is_list: bool = False
     min_length: int | None = None
     max_length: int | None = None
-    minimum: int | None = None
-    maximum: int | None = None
+    minimum: Number | None = None
+    maximum: Number | None = None
     enumeration: tuple[str, ...] = ()
     default: str | None = None
-    sizes: tuple[tuple[int | None, int | None], ...] = ()
-    ranges: tuple[tuple[int | None, int | None], ...] = ()
+    sizes: Sizes = ()
+    ranges: tuple[tuple[Number | None, Number | None], ...] = ()
     patterns: tuple[str, ...] = ()
     min_items: int | None = None
     max_items: int | None = None
     enumeration_ref: bool = False
+    steps: tuple[Number | None, ...] = ()
+    list_sizes: Sizes = ()
+    enumeration_target: str | None = None
+    enumeration_target_scope: str = "normal"
+    enumeration_null: str | None = None
+    path_ref: PathRef | None = None
 
 
 @dataclass(frozen=True)
@@ -169,10 +205,38 @@ def _syntax(element: ET.Element) -> Syntax | None:
     return None if syntax is None else _type_syntax(syntax)
 
 
-def _bounds(
-    elements: list[ET.Element], low: str, high: str
-) -> tuple[tuple[int | None, int | None], ...]:
+def _number(value: str | None) -> Number | None:
+    """An integer, or a finite Decimal for a fractional bound (a decimal type's range), else None."""
+    if value is None:
+        return None
+    text = value.strip()
+    if re.fullmatch(r"[+-]?[0-9]+", text):
+        return int(text)
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _bounds(elements: list[ET.Element], low: str, high: str) -> Sizes:
     return tuple((_int(e.get(low)), _int(e.get(high))) for e in elements)
+
+
+def _ranges(elements: list[ET.Element]) -> tuple[tuple[Number | None, Number | None], ...]:
+    return tuple((_number(e.get("minInclusive")), _number(e.get("maxInclusive"))) for e in elements)
+
+
+def _path_ref(element: ET.Element | None) -> PathRef | None:
+    if element is None:
+        return None
+    return PathRef(
+        tuple((element.get("targetParent") or "").split()),
+        element.get("targetParentScope") or "normal",
+        element.get("targetType") or "any",
+        element.get("targetDataType") or "any",
+        element.get("refType") or "weak",
+    )
 
 
 def _type_syntax(syntax: ET.Element) -> Syntax | None:
@@ -198,7 +262,15 @@ def _type_syntax(syntax: ET.Element) -> Syntax | None:
     else:
         return None
     sizes = _bounds([c for c in holder if c.tag == "size"], "minLength", "maxLength")
-    ranges = _bounds([c for c in holder if c.tag == "range"], "minInclusive", "maxInclusive")
+    range_elements = [c for c in holder if c.tag == "range"]
+    ranges = _ranges(range_elements)
+    steps = tuple(_number(e.get("step")) for e in range_elements)
+    list_sizes = (
+        _bounds([c for c in list_element if c.tag == "size"], "minLength", "maxLength")
+        if list_element is not None
+        else ()
+    )
+    reference = next((c for c in holder if c.tag == "enumerationRef"), None)
     values = tuple(
         e.get("value", "") for e in holder.iter("enumeration") if e.get("value") is not None
     )
@@ -218,7 +290,13 @@ def _type_syntax(syntax: ET.Element) -> Syntax | None:
         patterns,
         _int(list_element.get("minItems")) if list_element is not None else None,
         _int(list_element.get("maxItems")) if list_element is not None else None,
-        any(c.tag == "enumerationRef" for c in holder),
+        reference is not None,
+        steps,
+        list_sizes,
+        reference.get("targetParam") if reference is not None else None,
+        (reference.get("targetParamScope") or "normal") if reference is not None else "normal",
+        reference.get("nullValue") if reference is not None else None,
+        _path_ref(next((c for c in holder if c.tag == "pathRef"), None)),
     )
 
 
@@ -419,6 +497,66 @@ def children(tree: DataModel, path: str) -> list[ObjectDef | ParameterDef]:
     return out
 
 
+def _is_instance_node(node: str) -> bool:
+    return node in (_PLACEHOLDER, "*") or node.isdigit() or (node[:1] == "[" and node[-1:] == "]")
+
+
+def _parent_object(path: str) -> str:
+    """The object a Path Name's object sits in; for an instance, the table's parent ("#." always means that,
+    TR-106 A.2.3.4). Raises :class:`PathError` at the top of the hierarchy."""
+    nodes = path.rstrip(".").split(".")
+    cut = 2 if len(nodes) >= 2 and _is_instance_node(nodes[-1]) else 1
+    nodes = nodes[:-cut]
+    if not nodes:
+        raise PathError("a leading hash goes beyond the Root Object (TR-106 A.2.3.4)")
+    return ".".join(nodes) + "."
+
+
+def reference_path(current: str, target: str, scope: str = "normal") -> str:
+    """The full Path Name a reference's ``target`` names, read in ``scope`` from the object ``current``
+    (TR-106 A.2.3.4, Table 5).
+
+    ``current`` is the object the referring parameter sits in, as a template (``Device.LAN.DHCPOption.{i}.``)
+    or with instance numbers. ``normal``: a path beginning with the Root Object's name is full, one beginning
+    with a dot is relative to the Root Object, any other is relative to the current object and each leading
+    ``#`` climbs to the parent object (``#.`` from an instance is the table's parent, not the table); the empty
+    path is the top of the hierarchy (returned as ``""``). ``model`` is relative to the Root Object, ``object``
+    to the current object, ``absolute`` is used as given; hashes are refused outside ``normal`` and beyond the
+    Root Object. A Service Object or Mount Point is not modelled: the Root Object is the first node of
+    ``current``. Raises :class:`PathError`.
+    """
+    if scope not in ("normal", "model", "object", "absolute"):
+        raise PathError(f"{scope!r} is not a path name scope (TR-106 Table 5)")
+    if scope == "absolute":
+        return target
+    here = current if current.endswith(".") else current + "."
+    root = here.split(".", 1)[0] + "."
+    hashes = len(target) - len(target.lstrip("#"))
+    if hashes and scope != "normal":
+        raise PathError("leading hash characters are permitted only in the normal scope")
+    if scope == "model":
+        return root + target.lstrip(".")
+    if scope == "object":
+        return here + target.lstrip(".")
+    if target == "":
+        return ""
+    if target.split(".", 1)[0] + "." == root:
+        return target
+    if target.startswith("."):
+        return root + target[1:]
+    if hashes:
+        rest = target[hashes:]
+        if rest and not rest.startswith("."):
+            raise PathError("leading hash characters are followed by a dot (TR-106 A.2.3.4)")
+        base = here
+        for _ in range(hashes):
+            base = _parent_object(base)
+        return (
+            base + rest[1:]
+        )  # a bare "#" or "##" names the climbed-to object, as Device:2.22 writes it
+    return here + target
+
+
 class CoerceError(ValueError):
     """A value does not fit its parameter's type; ``reason`` says which rule it broke."""
 
@@ -477,14 +615,44 @@ def resolve_syntax(model: DataModel, syntax: Syntax) -> Syntax:
             derived.min_items if derived.min_items is not None else merged.min_items,
             derived.max_items if derived.max_items is not None else merged.max_items,
             derived.enumeration_ref or merged.enumeration_ref,
+            derived.steps if derived.ranges else merged.steps,
+            derived.list_sizes or merged.list_sizes,
+            derived.enumeration_target if derived.enumeration_ref else merged.enumeration_target,
+            derived.enumeration_target_scope
+            if derived.enumeration_ref
+            else merged.enumeration_target_scope,
+            derived.enumeration_null if derived.enumeration_ref else merged.enumeration_null,
+            derived.path_ref or merged.path_ref,
         )
     return merged
 
 
-def _in_ranges(number: int | Decimal, ranges: tuple[tuple[int | None, int | None], ...]) -> bool:
-    return not ranges or any(
-        (low is None or number >= low) and (high is None or number <= high) for low, high in ranges
+def _in_sizes(length: int, sizes: Sizes) -> bool:
+    return not sizes or any(
+        (low is None or length >= low) and (high is None or length <= high) for low, high in sizes
     )
+
+
+def _check_range(number: Number, syntax: Syntax) -> None:
+    """The model's ``range`` and ``step`` for a number (TR-106 A.2.3.3 Table 4: "Value ranges and step
+    (default step is 1)"). A step counts from the range's minimum, or from zero for a range with no minimum.
+    TR-106 does not say where a step counts from; the nine ranges with a step in Device:2.22 give the same
+    answer from either, so the choice is this library's and is recorded in ROADMAP.md."""
+    if not syntax.ranges:
+        return
+    inside = [
+        index
+        for index, (low, high) in enumerate(syntax.ranges)
+        if (low is None or number >= low) and (high is None or number <= high)
+    ]
+    if not inside:
+        raise CoerceError(f"{number} is outside the range the model gives")
+    for index in inside:
+        step = syntax.steps[index] if index < len(syntax.steps) else None
+        low = syntax.ranges[index][0]
+        if step is None or step <= 0 or (number - (low or 0)) % step == 0:
+            return
+    raise CoerceError(f"{number} is not on the step the model gives its range")
 
 
 def _datetime(text: str) -> datetime | timedelta:
@@ -514,10 +682,7 @@ def _datetime(text: str) -> datetime | timedelta:
 
 def _scalar(base: str, syntax: Syntax, text: str) -> object:
     if base == "string":
-        if syntax.sizes and not any(
-            (low is None or len(text) >= low) and (high is None or len(text) <= high)
-            for low, high in syntax.sizes
-        ):
+        if not _in_sizes(len(text), syntax.sizes):
             raise CoerceError(f"string of {len(text)} characters is outside the allowed length")
         if syntax.enumeration and text not in syntax.enumeration:
             raise CoerceError(f"{text[:40]!r} is not an enumerated value")
@@ -537,8 +702,7 @@ def _scalar(base: str, syntax: Syntax, text: str) -> object:
         low, high = _INT_RANGES[base]
         if not low <= number <= high:
             raise CoerceError(f"{number} is outside the range of {base}")
-        if not _in_ranges(number, syntax.ranges):
-            raise CoerceError(f"{number} is outside the range the model gives")
+        _check_range(number, syntax)
         return number
     if base == "decimal":
         try:
@@ -547,8 +711,7 @@ def _scalar(base: str, syntax: Syntax, text: str) -> object:
             raise CoerceError(f"{text[:20]!r} is not a decimal") from None
         if not decimal.is_finite():
             raise CoerceError("a decimal is finite")
-        if not _in_ranges(decimal, syntax.ranges):
-            raise CoerceError(f"{decimal} is outside the range the model gives")
+        _check_range(decimal, syntax)
         return decimal
     if base == "dateTime":
         return _datetime(text)
@@ -557,16 +720,17 @@ def _scalar(base: str, syntax: Syntax, text: str) -> object:
             raw = base64.b64decode(text, validate=True)
         except ValueError:
             raise CoerceError("not Base64") from None
-        if syntax.sizes and not any(
-            (low is None or len(raw) >= low) and (high is None or len(raw) <= high)
-            for low, high in syntax.sizes
-        ):
+        if not _in_sizes(len(raw), syntax.sizes):
             raise CoerceError(f"{len(raw)} bytes are outside the allowed length before encoding")
         return raw
     if base == "hexBinary":
         if len(text) % 2 or not re.fullmatch(r"[0-9A-Fa-f]*", text):
             raise CoerceError("not hexBinary")
-        return bytes.fromhex(text)
+        octets = bytes.fromhex(text)
+        # the size facet refers to the actual value, not the hex-encoded one (TR-106 A.2.3.3, Table 4)
+        if not _in_sizes(len(octets), syntax.sizes):
+            raise CoerceError(f"{len(octets)} bytes are outside the allowed length before encoding")
+        return octets
     raise CoerceError(f"no coercion for type {base!r}")
 
 
@@ -579,8 +743,148 @@ def _matches(pattern: str, text: str) -> bool:
         ) from None
 
 
+@dataclass(frozen=True)
+class _Context:
+    model: DataModel | None
+    path: str | None
+    lookup: Callable[[str], str | None] | None
+    instances: InstanceTree | None
+
+
+_INTEGERS = frozenset({"int", "long", "unsignedInt", "unsignedLong"})
+_ACCEPTS = {  # targetDataType -> the built-in types a referenced parameter may have (TR-106 Table 6)
+    "integer": _INTEGERS,
+    "decimal": _INTEGERS | {"decimal"},
+    "long": frozenset({"long", "int"}),
+    "unsignedLong": frozenset({"unsignedLong", "unsignedInt"}),
+}
+
+
+def _item(syntax: Syntax, text: str, context: _Context) -> object:
+    typed = _scalar(syntax.base, syntax, text)
+    if syntax.enumeration_target is not None:
+        _check_enumeration_ref(syntax, text, context)
+    if syntax.path_ref is not None and context.model is not None:
+        _check_path_ref(syntax.path_ref, text, context)
+    return typed
+
+
+def _object_of(path: str) -> str:
+    return path[: path.rindex(".") + 1] if "." in path else path
+
+
+def _check_enumeration_ref(syntax: Syntax, text: str, context: _Context) -> None:
+    """The value must be one of the items of the list-valued parameter the facet names, or its ``nullValue``
+    (TR-106 A.2.3.7, Table 8). Only checked when the caller gives the parameter's own path and a ``lookup``."""
+    if context.path is None or context.lookup is None:
+        return
+    if syntax.enumeration_null is not None and text == syntax.enumeration_null:
+        return
+    try:
+        target = reference_path(
+            _object_of(context.path),
+            syntax.enumeration_target or "",
+            syntax.enumeration_target_scope,
+        )
+    except PathError as error:
+        raise CoerceError(f"the enumerationRef target cannot be read: {error.reason}") from None
+    current = context.lookup(target)
+    if current is None:
+        raise CoerceError(f"{target[:80]} holds the valid values and has no value to check against")
+    if text not in current.split(","):
+        raise CoerceError(f"{text[:40]!r} is not among the values of {target[:80]}")
+
+
+def _template(path: str) -> str:
+    return ".".join(_PLACEHOLDER if _is_instance_node(n) else n for n in path.split("."))
+
+
+def _type_chain(model: DataModel, syntax: Syntax) -> set[str]:
+    """Every type name a parameter's type is: its named data types and the built-in one under them."""
+    names = {syntax.base}
+    for _ in range(_MAX_RESOLVE_DEPTH):
+        parent = model.data_types.get(syntax.base) if syntax.base not in _SIMPLE_TYPES else None
+        if parent is None:
+            break
+        syntax = parent
+        names.add(syntax.base)
+    return names
+
+
+def _check_path_ref(ref: PathRef, text: str, context: _Context) -> None:
+    """A path-name value against a ``pathRef`` facet (TR-106 A.2.3.7, Table 6): what it names exists in the
+    model and is of the right ``targetType``; with the parameter's own ``path`` its ``targetParent``; for a
+    referenced parameter its ``targetDataType``; for a strong reference and an ``instances`` tree, that the
+    row exists. The empty string is the null reference (A.2.3.5)."""
+    model = context.model
+    if model is None or text == "":
+        return
+    try:
+        (hit,) = resolve_path(model, text, aliases=False, wildcards=False)
+    except PathError as error:
+        raise CoerceError(f"{text[:60]!r} references nothing: {error.reason}") from None
+    definition = hit.definition
+    template = definition.path
+    kind = "parameter"
+    if isinstance(definition, ObjectDef):
+        kind = "single"
+        if definition.multi:
+            kind = "row" if template.count(_PLACEHOLDER) == len(hit.instances) else "table"
+    ok = {
+        "any": True,
+        "parameter": kind == "parameter",
+        "object": kind != "parameter",
+        "single": kind == "single",
+        "table": kind == "table",
+        "row": kind == "row",
+    }.get(ref.target_type)
+    if ok is None:
+        raise CoerceError(
+            f"the model's targetType {ref.target_type!r} is not one this reader knows"
+        )
+    if not ok:
+        raise CoerceError(f"{text[:60]!r} is a {kind}, and the reference takes {ref.target_type}")
+    if ref.target_parent and context.path is not None:
+        if kind == "parameter":
+            container = template.rsplit(".", 1)[0] + "."
+        elif kind == "row":
+            container = template[: -len(_PLACEHOLDER) - 1]
+        else:
+            container = _parent_object(template)
+        allowed = []
+        for parent in ref.target_parent:
+            try:
+                resolved = reference_path(_object_of(context.path), parent, ref.target_parent_scope)
+            except PathError as error:
+                raise CoerceError(f"targetParent {parent!r}: {error.reason}") from None
+            allowed.append(_template(resolved))
+        if container not in allowed:
+            raise CoerceError(f"{text[:60]!r} is not an immediate child of a targetParent")
+    if (
+        kind == "parameter"
+        and ref.target_data_type != "any"
+        and isinstance(definition, ParameterDef)
+        and definition.syntax is not None
+    ):
+        accepted = _ACCEPTS.get(ref.target_data_type, frozenset({ref.target_data_type}))
+        if not _type_chain(model, definition.syntax) & accepted:
+            raise CoerceError(f"{text[:60]!r} is not a {ref.target_data_type} parameter")
+    if (
+        ref.ref_type == "strong"
+        and context.instances is not None
+        and not context.instances.exists(text)
+    ):
+        raise CoerceError(f"{text[:60]!r} is a strong reference to an instance that is absent")
+
+
 def coerce_value(
-    parameter: ParameterDef, value: object, *, model: DataModel | None = None
+    parameter: ParameterDef,
+    value: object,
+    *,
+    model: DataModel | None = None,
+    path: str | None = None,
+    lookup: Callable[[str], str | None] | None = None,
+    instances: InstanceTree | None = None,
 ) -> object:
     """Check ``value`` against the parameter's type in a TR-181 data model and return it typed.
 
@@ -593,12 +897,17 @@ def coerce_value(
     for "unknown or not applicable" (A.2.1, Table 12). A list-valued parameter takes its comma-separated
     text and returns a list of typed items, bounded by the list's ``minItems`` and ``maxItems``.
 
-    What is checked: the type's own range (Table 12 gives int and unsignedInt; long, unsignedLong,
-    decimal and hexBinary come from TR-106, which this project has not read, so those use the XSD
-    definitions), the model's ``size``, ``range``, ``enumeration`` and ``pattern``. Not checked: ``step``,
-    ``enumerationRef``, ``pathRef``, hexBinary and list ``size``, and the "string defaults to 16
-    characters" rule, which Table 12 states for RPC arguments rather than data-model parameters.
-    Raises :class:`CoerceError` for a value that does not fit and :class:`PathError` when a named type
+    What is checked: the type's own range (Table 12 gives int and unsignedInt; TR-106 Appendix I.4 gives
+    long and unsignedLong), the model's ``size``, ``range`` with its ``step``, ``enumeration`` and
+    ``pattern``. A ``size`` on base64 and hexBinary counts the decoded bytes, a ``size`` on the ``list``
+    counts the characters of the whole value (TR-106 A.2.3.3, A.2.7.1; the unit of a list's size is this
+    library's reading, see ROADMAP.md). With ``model`` given, a ``pathRef`` value must name something in the
+    model of the right ``targetType`` and ``targetDataType``, and with the parameter's own instance ``path``
+    also sit under a ``targetParent``; with ``instances`` a strong reference must name an instance that
+    exists. An ``enumerationRef`` value is checked only when ``path`` and ``lookup`` (a function from a full
+    Path Name to that parameter's current value, or None) are both given. Not checked: ``instanceRef``, and
+    the "string defaults to 16 characters" rule, which Table 12 states for RPC arguments rather than
+    data-model parameters. Raises :class:`CoerceError` for a value that does not fit and :class:`PathError` when a named type
     cannot be resolved.
     """
     syntax = parameter.syntax
@@ -614,11 +923,14 @@ def coerce_value(
         value = str(value)
     if not isinstance(value, str):
         raise CoerceError(f"a {type(value).__name__} is not a TR-069 value; pass the text received")
+    context = _Context(model, path, lookup, instances)
     if not syntax.is_list:
-        return _scalar(syntax.base, syntax, value)
+        return _item(syntax, value, context)
+    if not _in_sizes(len(value), syntax.list_sizes):
+        raise CoerceError(f"a list value of {len(value)} characters is outside the list's size")
     items = value.split(",") if value else []
     if syntax.min_items is not None and len(items) < syntax.min_items:
         raise CoerceError(f"a list of {len(items)} items is shorter than {syntax.min_items}")
     if syntax.max_items is not None and len(items) > syntax.max_items:
         raise CoerceError(f"a list of {len(items)} items is longer than {syntax.max_items}")
-    return [_scalar(syntax.base, syntax, item) for item in items]
+    return [_item(syntax, item, context) for item in items]

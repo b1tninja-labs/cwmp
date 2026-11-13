@@ -24,8 +24,11 @@ from cwmp.datamodel import (
     children,
     coerce_value,
     load_model,
+    reference_path,
     resolve_path,
+    resolve_syntax,
 )
+from cwmp.instances import InstanceTree
 
 COMPONENT = b"""<?xml version="1.0" encoding="UTF-8"?>
 <dm:document xmlns:dm="urn:broadband-forum-org:cwmp:datamodel-1-8" spec="urn:example:test-1-0">
@@ -352,3 +355,297 @@ def test_list_bounds_and_items(typed):
 def test_a_parameter_without_a_type_is_refused():
     with pytest.raises(CoerceError, match="no type"):
         coerce_value(ParameterDef("Device.X", "readOnly", None), "1")
+
+
+# --- TR-106 facets: step, size on hexBinary and lists, enumerationRef, pathRef (TR-106 Amendment 18, read raw) ---
+
+FACETS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<dm:document xmlns:dm="urn:broadband-forum-org:cwmp:datamodel-1-8" spec="urn:example:test-1-0">
+  <dataType name="Ethertype"><hexBinary><size minLength="2" maxLength="2"/></hexBinary></dataType>
+  <dataType name="RowRef"><string><pathRef targetType="row" refType="strong"/></string></dataType>
+  <model name="Device:2.0">
+    <object name="Device." access="readOnly" minEntries="1" maxEntries="1">
+      <parameter name="Stepped" access="readWrite">
+        <syntax><int><range minInclusive="-125" maxInclusive="125" step="125"/></int></syntax>
+      </parameter>
+      <parameter name="SteppedFromTen" access="readWrite">
+        <syntax><unsignedInt><range minInclusive="10" maxInclusive="40" step="10"/><range minInclusive="100" maxInclusive="100"/></unsignedInt></syntax>
+      </parameter>
+      <parameter name="Fraction" access="readWrite">
+        <syntax><decimal><range minInclusive="0.5" maxInclusive="2" step="0.5"/></decimal></syntax>
+      </parameter>
+      <parameter name="Color" access="readWrite">
+        <syntax><hexBinary><size minLength="3" maxLength="3"/></hexBinary></syntax>
+      </parameter>
+      <parameter name="Ether" access="readWrite"><syntax><dataType ref="Ethertype"/></syntax></parameter>
+      <parameter name="Names" access="readWrite">
+        <syntax><list><size maxLength="9"/></list><string><size maxLength="4"/></string></syntax>
+      </parameter>
+      <parameter name="Modes" access="readOnly">
+        <syntax><list/><string/></syntax>
+      </parameter>
+      <parameter name="Chosen" access="readWrite">
+        <syntax><string><enumerationRef targetParam="Modes" nullValue="None"/></string></syntax>
+      </parameter>
+      <parameter name="ChosenFar" access="readWrite">
+        <syntax><list/><string><enumerationRef targetParam="#.Modes"/></string></syntax>
+      </parameter>
+    </object>
+    <object name="Device.Box." access="readOnly" minEntries="1" maxEntries="1">
+      <parameter name="ModeChoice" access="readWrite">
+        <syntax><string><enumerationRef targetParam="#.Modes"/></string></syntax>
+      </parameter>
+      <parameter name="Ref" access="readWrite">
+        <syntax><string><pathRef targetType="parameter" targetDataType="integer"/></string></syntax>
+      </parameter>
+      <parameter name="Number" access="readOnly"><syntax><unsignedInt/></syntax></parameter>
+      <parameter name="Text" access="readOnly"><syntax><string/></syntax></parameter>
+    </object>
+    <object name="Device.Port.{i}." access="readWrite" minEntries="0" maxEntries="unbounded">
+      <parameter name="Name" access="readWrite"><syntax><string/></syntax></parameter>
+      <parameter name="Peer" access="readWrite">
+        <syntax><string><pathRef targetParent="#.Port." targetType="row" refType="strong"/></string></syntax>
+      </parameter>
+      <parameter name="Elsewhere" access="readWrite">
+        <syntax><string><pathRef targetParent=".Other." targetType="row"/></string></syntax>
+      </parameter>
+      <parameter name="Table" access="readWrite">
+        <syntax><string><pathRef targetType="table"/></string></syntax>
+      </parameter>
+      <parameter name="Single" access="readWrite">
+        <syntax><string><pathRef targetType="single"/></string></syntax>
+      </parameter>
+      <parameter name="Any" access="readWrite">
+        <syntax><dataType ref="RowRef"/></syntax>
+      </parameter>
+    </object>
+    <object name="Device.Other.{i}." access="readWrite" minEntries="0" maxEntries="unbounded">
+      <parameter name="Name" access="readWrite"><syntax><string/></syntax></parameter>
+    </object>
+  </model>
+</dm:document>"""
+
+
+@pytest.fixture(scope="module")
+def facets() -> DataModel:
+    return load_model(FACETS)
+
+
+def _facet(facets: DataModel, template: str, value: object, **kwargs: object) -> object:
+    return coerce_value(facets.parameters[template], value, model=facets, **kwargs)  # type: ignore[arg-type]
+
+
+def test_a_range_step_counts_from_the_minimum_of_the_range_it_is_in(facets):
+    # TR-106 Table 4: "Value ranges and step (default step is 1)"
+    for text in ("-125", "0", "125"):
+        assert _facet(facets, "Device.Stepped", text) == int(text)
+    for text in ("1", "-124", "62"):
+        with pytest.raises(CoerceError, match="step"):
+            _facet(facets, "Device.Stepped", text)
+    with pytest.raises(CoerceError, match="range"):
+        _facet(facets, "Device.Stepped", "250")
+    # the step counts from the range's own minimum (10), and the second range has no step
+    assert _facet(facets, "Device.SteppedFromTen", "30") == 30
+    assert _facet(facets, "Device.SteppedFromTen", "100") == 100
+    for text in ("15", "5", "50"):
+        with pytest.raises(CoerceError):
+            _facet(facets, "Device.SteppedFromTen", text)
+
+
+def test_a_fractional_range_and_step_on_a_decimal_are_kept(facets):
+    syntax = facets.parameters["Device.Fraction"].syntax
+    assert syntax is not None
+    assert syntax.ranges == ((Decimal("0.5"), 2),)
+    assert syntax.steps == (Decimal("0.5"),)
+    assert _facet(facets, "Device.Fraction", "1.5") == Decimal("1.5")
+    for text in ("0.25", "0.4", "2.5"):
+        with pytest.raises(CoerceError):
+            _facet(facets, "Device.Fraction", text)
+
+
+def test_tr106_types_and_list_size(facets):
+    # TR-106 Table 4: the size facet of a hexBinary (or base64) refers to the actual value, not the encoded one
+    assert _facet(facets, "Device.Color", "FF00aa") == b"\xff\x00\xaa"
+    for text in ("FF00", "FF00AA00"):
+        with pytest.raises(CoerceError, match="bytes"):
+            _facet(facets, "Device.Color", text)
+    assert _facet(facets, "Device.Ether", "888E") == b"\x88\x8e"
+    with pytest.raises(CoerceError):
+        _facet(facets, "Device.Ether", "888E00")
+    # the list's own size counts the characters of the whole value, each item is held to the item size
+    assert _facet(facets, "Device.Names", "ab,cd") == ["ab", "cd"]
+    assert _facet(facets, "Device.Names", "abcd,abcd") == ["abcd", "abcd"]  # 9 characters
+    with pytest.raises(CoerceError, match="list's size"):
+        _facet(facets, "Device.Names", "abcd,abcd,e")
+    with pytest.raises(CoerceError):
+        _facet(facets, "Device.Names", "abcde")
+
+
+def test_enumeration_ref_is_checked_against_the_value_of_the_named_parameter(facets):
+    values = {"Device.Modes": "WPA,WPA2"}
+
+    def choose(name: str, text: str, path: str) -> object:
+        return _facet(facets, name, text, path=path, lookup=values.get)
+
+    assert choose("Device.Chosen", "WPA2", "Device.Chosen") == "WPA2"
+    assert choose("Device.Chosen", "None", "Device.Chosen") == "None"  # the facet's nullValue
+    with pytest.raises(CoerceError, match="not among"):
+        choose("Device.Chosen", "WEP", "Device.Chosen")
+    with pytest.raises(CoerceError, match="not among"):
+        choose("Device.Chosen", "", "Device.Chosen")  # no nullValue of "" is designated
+    # a list-valued parameter checks every item; an empty list is the "none apply" answer
+    assert choose("Device.ChosenFar", "WPA,WPA2", "Device.Box.Anything") == ["WPA", "WPA2"]
+    assert choose("Device.ChosenFar", "", "Device.Box.Anything") == []
+    with pytest.raises(CoerceError):
+        choose("Device.ChosenFar", "WPA,WEP", "Device.Box.Anything")
+    # a relative target reads from the object the parameter is in
+    assert choose("Device.Box.ModeChoice", "WPA", "Device.Box.ModeChoice") == "WPA"
+    with pytest.raises(CoerceError):
+        choose("Device.Box.ModeChoice", "TKIP", "Device.Box.ModeChoice")
+    # a target with no value cannot be checked against, and without lookup nothing is checked
+    with pytest.raises(CoerceError, match="no value"):
+        _facet(facets, "Device.Chosen", "WPA", path="Device.Chosen", lookup={}.get)
+    assert _facet(facets, "Device.Chosen", "anything") == "anything"
+
+
+def test_the_enumeration_ref_facet_survives_a_derived_type():
+    model = load_model(
+        b"""<dm:document xmlns:dm="urn:broadband-forum-org:cwmp:datamodel-1-8" spec="urn:x">
+          <dataType name="Pick"><string><enumerationRef targetParam="Modes" nullValue="-"/></string></dataType>
+          <dataType name="Pick2" base="Pick"/>
+          <model name="Device:2.0"><object name="Device." access="readOnly">
+            <parameter name="P" access="readWrite"><syntax><dataType ref="Pick2"/></syntax></parameter>
+          </object></model></dm:document>"""
+    )
+    parameter = model.parameters["Device.P"]
+    assert parameter.syntax is not None
+    assert resolve_syntax(model, parameter.syntax).enumeration_target == "Modes"
+    modes = {"Device.Modes": "a,b"}
+    assert coerce_value(parameter, "b", model=model, path="Device.P", lookup=modes.get) == "b"
+    with pytest.raises(CoerceError):
+        coerce_value(parameter, "c", model=model, path="Device.P", lookup=modes.get)
+
+
+@pytest.mark.parametrize(
+    ("current", "target", "scope", "expected"),
+    [
+        # the four examples of TR-106 A.2.3.4 for the current object Device.LAN.DHCPOption.{i}.
+        ("Device.LAN.DHCPOption.{i}.", "#.", "normal", "Device.LAN."),
+        ("Device.LAN.DHCPOption.{i}.", "#.DHCPOption.", "normal", "Device.LAN.DHCPOption."),
+        ("Device.LAN.DHCPOption.{i}.", "#.Stats.", "normal", "Device.LAN.Stats."),
+        (
+            "Device.LAN.DHCPOption.{i}.",
+            "#.Stats.TotalBytesSent",
+            "normal",
+            "Device.LAN.Stats.TotalBytesSent",
+        ),
+        ("Device.LAN.DHCPOption.{i}.", "##.", "normal", "Device."),
+        ("Device.LAN.DHCPOption.{i}.", "##.DeviceInfo.", "normal", "Device.DeviceInfo."),
+        # the examples with "Device.LAN." as the current object
+        ("Device.LAN.", "IPAddress", "normal", "Device.LAN.IPAddress"),
+        ("Device.LAN.", "Stats.", "normal", "Device.LAN.Stats."),
+        ("Device.LAN.", "#.DeviceInfo.", "normal", "Device.DeviceInfo."),
+        # a full path, a leading dot, the empty path
+        ("Device.LAN.", "Device.IP.", "normal", "Device.IP."),
+        ("Device.LAN.", ".DeviceInfo.", "normal", "Device.DeviceInfo."),
+        ("Device.LAN.", "", "normal", ""),
+        # the other scopes
+        ("Device.LAN.", "", "model", "Device."),
+        ("Device.LAN.", ".IP.", "model", "Device.IP."),
+        ("Device.LAN.", "", "object", "Device.LAN."),
+        ("Device.LAN.", ".Stats.", "object", "Device.LAN.Stats."),
+        ("Device.LAN.", "Device.X.", "absolute", "Device.X."),
+        # instance numbers in the current object are carried by a relative path and climbed by a hash
+        ("Device.A.3.B.", "C.", "normal", "Device.A.3.B.C."),
+        ("Device.A.3.B.", "#.C.", "normal", "Device.A.3.C."),
+        ("Device.A.3.B.", "##.C.", "normal", "Device.C."),
+        # Device:2.22 writes a bare "#" or "##" for the object climbed to (two of its targetParent values)
+        ("Device.A.{i}.B.{i}.", "#", "normal", "Device.A.{i}."),
+        ("Device.A.{i}.B.{i}.", "##", "normal", "Device."),
+    ],
+)
+def test_reference_paths_follow_the_scopes_of_tr106_a_2_3_4(current, target, scope, expected):
+    assert reference_path(current, target, scope) == expected
+
+
+@pytest.mark.parametrize(
+    ("current", "target", "scope"),
+    [
+        ("Device.LAN.", "###.", "normal"),  # beyond the Root Object
+        ("Device.LAN.", "##.", "normal"),  # also beyond: Device. has no parent
+        ("Device.LAN.", "#.X", "model"),  # hashes only in the normal scope
+        ("Device.LAN.", "#.X", "object"),
+        ("Device.LAN.", "#X", "normal"),
+        ("Device.LAN.", "X", "sideways"),
+    ],
+)
+def test_reference_paths_refuse_what_the_rules_forbid(current, target, scope):
+    with pytest.raises(PathError):
+        reference_path(current, target, scope)
+
+
+def test_path_ref_checks_target_type_parent_and_data_type(facets):
+    instances = InstanceTree(facets, ["Device.Port.1.", "Device.Port.2.", "Device.Other.7."])
+    mine = "Device.Port.1.Peer"
+
+    def peer(text: str, **kwargs: object) -> object:
+        return _facet(facets, "Device.Port.{i}.Peer", text, path=mine, **kwargs)
+
+    assert peer("Device.Port.2.") == "Device.Port.2."
+    assert peer("") == ""  # the null reference of a string (A.2.3.5)
+    assert peer("Device.Port.2.", instances=instances) == "Device.Port.2."
+    with pytest.raises(
+        CoerceError, match="absent"
+    ):  # a strong reference to a row that is not there
+        peer("Device.Port.9.", instances=instances)
+    assert peer("Device.Port.9.") == "Device.Port.9."  # without instance data it cannot be known
+    for bad, why in (
+        ("Device.Port.", "table"),  # the table, not a row
+        ("Device.Port.2.Name", "parameter"),
+        ("Device.Box.", "single"),
+        ("Device.Other.7.", "targetParent"),  # a row, but not a child of Device.Port.
+    ):
+        with pytest.raises(CoerceError, match=why):
+            peer(bad)
+    with pytest.raises(CoerceError, match="references nothing"):
+        peer("Device.Nowhere.1.")
+    with pytest.raises(CoerceError, match="references nothing"):
+        peer("Device.Port.0.")
+    # a targetParent in the model scope: ".Other." is Device.Other.
+    other = _facet(facets, "Device.Port.{i}.Elsewhere", "Device.Other.7.", path=mine)
+    assert other == "Device.Other.7."
+    with pytest.raises(CoerceError, match="targetParent"):
+        _facet(facets, "Device.Port.{i}.Elsewhere", "Device.Port.1.", path=mine)
+    # without the parameter's own path the parent cannot be resolved, and is not checked
+    assert _facet(facets, "Device.Port.{i}.Elsewhere", "Device.Port.1.") == "Device.Port.1."
+    # table, single and a named type carrying the facet
+    assert _facet(facets, "Device.Port.{i}.Table", "Device.Other.") == "Device.Other."
+    with pytest.raises(CoerceError):
+        _facet(facets, "Device.Port.{i}.Table", "Device.Other.7.")
+    assert _facet(facets, "Device.Port.{i}.Single", "Device.Box.") == "Device.Box."
+    with pytest.raises(CoerceError):
+        _facet(facets, "Device.Port.{i}.Single", "Device.Port.")
+    assert _facet(facets, "Device.Port.{i}.Any", "Device.Port.1.") == "Device.Port.1."
+    with pytest.raises(CoerceError, match="parameter"):
+        _facet(facets, "Device.Port.{i}.Any", "Device.Port.1.Name")
+
+
+def test_path_ref_target_data_type_follows_the_builtin_hierarchy(facets):
+    ref = facets.parameters["Device.Box.Ref"]
+    assert coerce_value(ref, "Device.Box.Number", model=facets) == "Device.Box.Number"
+    with pytest.raises(CoerceError, match="integer"):
+        coerce_value(ref, "Device.Box.Text", model=facets)
+    with pytest.raises(CoerceError, match="parameter"):
+        coerce_value(ref, "Device.Box.", model=facets)
+
+
+def test_an_instance_tree_checks_its_paths_against_the_model(facets):
+    tree = InstanceTree(facets, ["Device.Port.3.", "Device.Port.1."])
+    assert tree.numbers("Device.Port.") == [1, 3]
+    assert tree.exists("Device.Port.3.Name")
+    assert not tree.exists("Device.Port.2.Name")
+    assert tree.exists("Device.Port.")  # the table exists whether or not it has rows
+    assert not tree.exists("Device.Nowhere.")
+    for bad in ("Device.Port.", "Device.Box.", "Device.Port.x.", "Device.Port.1.Name."):
+        with pytest.raises(PathError):
+            InstanceTree(facets, [bad])

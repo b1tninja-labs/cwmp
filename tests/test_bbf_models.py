@@ -28,6 +28,7 @@ from cwmp.datamodel import (
     PathError,
     coerce_value,
     load_model,
+    reference_path,
     resolve_path,
     resolve_syntax,
 )
@@ -299,3 +300,151 @@ def test_a_list_parameter_of_the_published_model(real):
 def test_the_flattened_file_alone_is_a_complete_model(full_only, real):
     assert set(full_only.parameters) == set(real.parameters)
     assert set(full_only.objects) == set(real.objects)
+
+
+def _documented_parameters(real):
+    """Every parameter of the published model with its resolved syntax, and the object it sits in."""
+    for parameter in real.parameters.values():
+        assert parameter.syntax is not None
+        yield (
+            parameter,
+            resolve_syntax(real, parameter.syntax),
+            parameter.path.rsplit(".", 1)[0] + ".",
+        )
+
+
+def test_every_step_in_the_published_model_is_enforced(real):
+    # ten ranges in Device:2.22 carry a step (-125..125 step 125, 0..61440 step 4096, ...)
+    stepped = 0
+    for parameter, syntax, _ in _documented_parameters(real):
+        for (low, high), step in zip(syntax.ranges, syntax.steps, strict=False):
+            if step is None:
+                continue
+            stepped += 1
+            assert low is not None
+            assert high is not None
+            assert coerce_value(parameter, str(low), model=real) == low
+            assert coerce_value(parameter, str(low + step), model=real) == low + step
+            with pytest.raises(CoerceError, match="step"):
+                coerce_value(parameter, str(low + step + 1), model=real)
+    assert stepped == 10
+
+
+def test_hexbinary_sizes_count_bytes_in_the_published_model(real):
+    # TR-106 A.2.3.3 Table 4: the size facet refers to the actual value, not the hex-encoded one. The model's
+    # own evidence: TrafficPermissionEthertype is hexBinary with size 2 and default "888E", two bytes.
+    ether = real.parameters["Device.MoCA.Interface.{i}.TrafficPermissionEthertype"]
+    assert coerce_value(ether, "888E", model=real) == b"\x88\x8e"
+    with pytest.raises(CoerceError, match="bytes"):
+        coerce_value(ether, "888E00", model=real)
+    with pytest.raises(CoerceError, match="bytes"):
+        coerce_value(ether, "88", model=real)
+    sized = [
+        p
+        for p, s, _ in _documented_parameters(real)
+        if s.base == "hexBinary" and s.sizes and not s.is_list
+    ]
+    assert len(sized) == 152
+    for parameter in sized:
+        syntax = resolve_syntax(real, parameter.syntax)
+        high = syntax.sizes[0][1]
+        if high is not None and high < 1000:
+            with pytest.raises(CoerceError):
+                coerce_value(parameter, "00" * (high + 1), model=real)
+            coerce_value(parameter, "00" * high, model=real)
+
+
+def test_list_sizes_of_the_published_model_are_read_and_applied_to_the_value(real):
+    sized = [(p, s) for p, s, _ in _documented_parameters(real) if s.list_sizes]
+    assert len(sized) == 153
+    bounded = [(p, s) for p, s in sized if s.list_sizes[0][1] is not None]
+    assert len(bounded) == 124
+    for parameter, syntax in bounded:
+        limit = syntax.list_sizes[0][1]
+        assert limit is not None
+        if (
+            syntax.base == "string"
+            and syntax.path_ref is None
+            and syntax.enumeration_target is None
+            and not syntax.sizes
+            and not syntax.enumeration
+            and not syntax.patterns
+        ):
+            assert coerce_value(parameter, "a" * limit, model=real)
+            with pytest.raises(CoerceError, match="list's size"):
+                coerce_value(parameter, "a" * (limit + 1), model=real)
+
+
+def test_every_enumeration_ref_of_the_published_model_names_a_list_parameter(real):
+    # 69 parameters; each target, read in its scope from the object the parameter sits in, is a list-valued
+    # parameter of the model (the "##.Modes" and ".Security.ModesSupported" forms of TR-106 A.2.3.4)
+    checked = 0
+    for parameter, syntax, owner in _documented_parameters(real):
+        if syntax.enumeration_target is None:
+            continue
+        target = reference_path(owner, syntax.enumeration_target, syntax.enumeration_target_scope)
+        found = real.parameters[target]
+        assert found.syntax is not None
+        assert resolve_syntax(real, found.syntax).is_list, (parameter.path, target)
+        checked += 1
+    assert checked == 69
+
+
+def test_enumeration_ref_of_the_published_model_against_instance_values(real):
+    # ModeEnabled is a string whose valid values are the items of the list ModesSupported next to it
+    mode = real.parameters["Device.WiFi.AccessPoint.{i}.Security.ModeEnabled"]
+    own = "Device.WiFi.AccessPoint.3.Security.ModeEnabled"
+    values = {"Device.WiFi.AccessPoint.3.Security.ModesSupported": "None,WPA2-Personal"}
+    assert coerce_value(mode, "WPA2-Personal", model=real, path=own, lookup=values.get)
+    with pytest.raises(CoerceError, match="not among"):
+        coerce_value(mode, "WPA3-Personal", model=real, path=own, lookup=values.get)
+    # a list-valued parameter checks each of its items against the list it names
+    used = real.parameters["Device.ManagementServer.LightweightNotificationProtocolsUsed"]
+    supported = {"Device.ManagementServer.LightweightNotificationProtocolsSupported": "UDP,TCP"}
+    path = "Device.ManagementServer.LightweightNotificationProtocolsUsed"
+    assert coerce_value(used, "UDP,TCP", model=real, path=path, lookup=supported.get) == [
+        "UDP",
+        "TCP",
+    ]
+    with pytest.raises(CoerceError, match="not among"):
+        coerce_value(used, "UDP,XMPP", model=real, path=path, lookup=supported.get)
+
+
+def test_every_path_ref_target_parent_of_the_published_model_is_an_object(real):
+    # 374 targetParent values over 132 pathRef facets, in the normal scope with "##.IP.Interface.", ".Security.
+    # Certificate." and the bare "#" and "##" forms: each, read from the object its parameter sits in, is an
+    # object (or table) the model defines
+    checked = 0
+    for parameter, syntax, owner in _documented_parameters(real):
+        reference = syntax.path_ref
+        if reference is None:
+            continue
+        for parent in reference.target_parent:
+            resolved = reference_path(owner, parent, reference.target_parent_scope)
+            template = ".".join("{i}" if n.isdigit() else n for n in resolved.split("."))
+            assert template in real.objects or template + "{i}." in real.objects, (
+                parameter.path,
+                parent,
+                resolved,
+            )
+            checked += 1
+    assert checked == 374
+
+
+def test_a_path_ref_of_the_published_model_accepts_a_row_and_refuses_the_rest(real):
+    reference = real.parameters["Device.IP.Interface.{i}.LowerLayers"]
+    address = real.parameters["Device.IP.Interface.{i}.IPv4Address.{i}.IPAddress"]
+    own = "Device.IP.Interface.1.LowerLayers"
+    assert reference.syntax is not None
+    assert address.syntax is not None
+    assert resolve_syntax(real, reference.syntax).path_ref is not None
+    assert coerce_value(reference, "Device.Ethernet.Interface.2.", model=real, path=own) == [
+        "Device.Ethernet.Interface.2."
+    ]
+    for bad in (
+        "Device.Ethernet.Interface.",
+        "Device.Ethernet.Interface.2.Enable",
+        "Device.Nowhere.1.",
+    ):
+        with pytest.raises(CoerceError):
+            coerce_value(reference, bad, model=real, path=own)

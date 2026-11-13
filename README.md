@@ -69,6 +69,7 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 | `session` | ACS session state, authentication and fault handling (TR-069) |
 | `endpoint` | CPE side: inform, connection request, method dispatch (TR-069) |
 | `datamodel` | object tree, parameter paths, types and constraints (TR-181, TR-098) |
+| `instances` | instance data over a data model, and GetParameterNames answers (TR-069 A.3.2.3) |
 | `auth` | HTTP Digest challenge and response (RFC 7616, TR-069) |
 | `transfer` | TransferFile, Download and Upload with resumable semantics (TR-069) |
 | `clock` | periodic inform, session timeout and connection request retry |
