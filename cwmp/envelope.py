@@ -8,7 +8,8 @@ here; its licence does not allow modification.
 
 ``decode_envelope`` reads an envelope through ``devicespy.xmlsafe`` and returns either an
 :class:`Envelope` (an RPC request or response) or a :class:`Fault`. Prefixes are arbitrary, so
-every match is on a namespace URI. ``encode_envelope`` is not implemented yet and raises.
+every match is on a namespace URI. ``encode_envelope`` writes the same shapes back, refusing what
+section 3.5 and Table 4 forbid.
 """
 
 from __future__ import annotations
@@ -20,22 +21,24 @@ from typing import TYPE_CHECKING
 
 from devicespy import xmlsafe
 
-from .errors import EnvelopeError, XmlRefused
+from .errors import EncodeError, EnvelopeError, XmlRefused
 
 if TYPE_CHECKING:
-    from typing import Any
+    pass
 
-    Rpc = Any  # placeholder: give it a real type in the milestone that needs it
-    SessionContext = Any  # placeholder: give it a real type in the milestone that needs it
 
 __all__ = [
+    "DEFAULT_CWMP_NS",
     "MAX_BYTES",
     "SOAP_ENC_NS",
     "SOAP_ENV_NS",
+    "Arg",
     "Envelope",
     "Fault",
     "Headers",
     "ParameterFault",
+    "Rpc",
+    "SessionContext",
     "UnknownHeader",
     "decode_envelope",
     "encode_envelope",
@@ -121,15 +124,194 @@ class Envelope:
         return self.headers.id
 
 
-def encode_envelope(rpc: Rpc, session: SessionContext) -> bytes:
-    """Pending behaviour defined by TR-069 Amendment 6 Corrigendum 1, section 3.5.
+_XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+_XSD_NS = "http://www.w3.org/2001/XMLSchema"
+#: The default namespace: Annex A.6 says versions 1.2, 1.3 and 1.4 all use cwmp-1-2.
+DEFAULT_CWMP_NS = "urn:dslforum-org:cwmp-1-2"
+_NCNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+_TYPE_REF = re.compile(r"(?:xsd|cwmp|soap-enc):[A-Za-z_][A-Za-z0-9_.-]*")
+_BAD_XML = re.compile("[^\t\n\r -퟿-�\U00010000-\U0010ffff]")
+_MIN_SESSION_TIMEOUT = 30
 
-    Not implemented yet. See the ``envelope.encode_envelope()`` row in ROADMAP.md; this
-    stub raises on purpose so nothing downstream mistakes it for working code.
+
+@dataclass(frozen=True)
+class Arg:
+    """One element inside an RPC method element, named without a namespace prefix.
+
+    Section 3.5: the CWMP schema's elementFormDefault is "unqualified", so only the method element and the
+    header elements carry the CWMP namespace and an argument never does. ``text`` and ``children`` are
+    exclusive. ``xsi_type`` (``xsd:string``) is written as an ``xsi:type`` attribute; ``any_simple`` marks
+    an element the schema types ``anySimpleType``, which MUST carry one (section 3.5; Table 12 in A.2.1).
+    ``array_type`` makes the element a SOAP array of that member type (``cwmp:ParameterValueStruct``,
+    ``xsd:string``); every child is then a member and must be named as the member type without a prefix.
     """
-    raise NotImplementedError(
-        "encode_envelope() is not implemented: TR-069 Amendment 6 Corrigendum 1 section 3.5"
+
+    name: str
+    text: str | None = None
+    children: tuple[Arg, ...] = ()
+    xsi_type: str | None = None
+    any_simple: bool = False
+    array_type: str | None = None
+
+
+@dataclass(frozen=True)
+class Rpc:
+    """A method call or response: ``method`` is the element name (``GetParameterNames``,
+    ``GetParameterNamesResponse``), in the CWMP namespace."""
+
+    method: str
+    arguments: tuple[Arg, ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """What the encoder needs that is not in the RPC: the namespace, the headers, and who is sending.
+
+    ``sender`` is ``cpe`` or ``acs``; Table 4 restricts HoldRequests to the ACS, SessionTimeout and
+    SupportedCWMPVersions to a CPE's Inform, and UseCWMPVersion to an ACS's InformResponse, so those
+    headers are refused unless ``sender`` says they are allowed. ``in_reply_to`` is ``request``,
+    ``response`` or ``fault`` and must be ``request`` to encode a fault, which may answer a request only.
+    """
+
+    id: str | None = None
+    namespace: str = DEFAULT_CWMP_NS
+    sender: str | None = None
+    hold_requests: bool | None = None
+    session_timeout: int | None = None
+    supported_versions: tuple[str, ...] | None = None
+    use_version: str | None = None
+    in_reply_to: str | None = None
+
+
+def _escape(text: str, what: str) -> str:
+    if _BAD_XML.search(text):
+        raise EncodeError(f"{what} holds a character XML 1.0 cannot carry")
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _name(text: str, what: str) -> str:
+    if not _NCNAME.fullmatch(text):
+        raise EncodeError(f"{what} {text[:40]!r} is not an XML name")
+    return text
+
+
+def _arg(arg: Arg, depth: int) -> str:
+    if depth > _MAX_DEPTH:
+        raise EncodeError("arguments are nested too deeply")
+    name = _name(arg.name, "argument name")
+    if arg.text is not None and arg.children:
+        raise EncodeError(f"argument {name} has both text and children")
+    attrs = ""
+    if arg.any_simple and arg.xsi_type is None:
+        raise EncodeError(f"argument {name} is anySimpleType and needs an xsi:type (section 3.5)")
+    if arg.xsi_type is not None:
+        if not _TYPE_REF.fullmatch(arg.xsi_type):
+            raise EncodeError(
+                f"xsi:type {arg.xsi_type[:40]!r} needs a xsd:, cwmp: or soap-enc: prefix"
+            )
+        attrs += f' xsi:type="{arg.xsi_type}"'
+    if arg.array_type is not None:
+        if not _TYPE_REF.fullmatch(arg.array_type):
+            raise EncodeError(
+                f"arrayType {arg.array_type[:40]!r} needs a prefix (section 3.5 note)"
+            )
+        member = arg.array_type.split(":", 1)[1]
+        for child in arg.children:
+            if child.name != member:
+                raise EncodeError(
+                    f"array {name}: a member is named for its type {member!r} (section 3.5), not {child.name!r}"
+                )
+        attrs += f' soap-enc:arrayType="{arg.array_type}[{len(arg.children)}]"'
+    inner = _escape(arg.text, f"argument {name}") if arg.text is not None else ""
+    inner += "".join(_arg(child, depth + 1) for child in arg.children)
+    if not inner and not attrs:
+        return f"<{name}/>"
+    return f"<{name}{attrs}>{inner}</{name}>"
+
+
+def _header(session: SessionContext, method: str | None) -> str:
+    out = ""
+    if session.id is not None:
+        out += f'<cwmp:ID soap-env:mustUnderstand="1">{_escape(session.id, "ID")}</cwmp:ID>'
+    if session.hold_requests is not None:
+        if session.sender != "acs":
+            raise EncodeError("HoldRequests is sent by an ACS only (Table 4)")
+        flag = "1" if session.hold_requests else "0"
+        out += f'<cwmp:HoldRequests soap-env:mustUnderstand="1">{flag}</cwmp:HoldRequests>'
+    if session.session_timeout is not None:
+        if session.sender != "cpe" or method != "Inform":
+            raise EncodeError("SessionTimeout is sent by a CPE, in an Inform, only (Table 4)")
+        if session.session_timeout < _MIN_SESSION_TIMEOUT:
+            raise EncodeError("SessionTimeout must be 30 seconds or greater (Table 4)")
+        timeout = session.session_timeout
+        out += f'<cwmp:SessionTimeout soap-env:mustUnderstand="0">{timeout}</cwmp:SessionTimeout>'
+    if session.supported_versions is not None:
+        if session.sender != "cpe" or method != "Inform" or not session.supported_versions:
+            raise EncodeError(
+                "SupportedCWMPVersions is a CPE's, in an Inform, and not empty (Table 4)"
+            )
+        listing = _escape(",".join(session.supported_versions), "SupportedCWMPVersions")
+        out += f'<cwmp:SupportedCWMPVersions soap-env:mustUnderstand="0">{listing}</cwmp:SupportedCWMPVersions>'
+    if session.use_version is not None:
+        if session.sender != "acs" or method != "InformResponse":
+            raise EncodeError("UseCWMPVersion is an ACS's, in an InformResponse, only (Table 4)")
+        version = _escape(session.use_version, "UseCWMPVersion")
+        out += f'<cwmp:UseCWMPVersion soap-env:mustUnderstand="1">{version}</cwmp:UseCWMPVersion>'
+    return f"<soap-env:Header>{out}</soap-env:Header>" if out else ""
+
+
+def _fault_body(fault: Fault) -> str:
+    if fault.faultcode.rsplit(":", 1)[-1] not in ("Client", "Server"):
+        raise EncodeError("faultcode is neither Client nor Server (section 3.5)")
+    details = (
+        f"<FaultCode>{int(fault.code)}</FaultCode>"
+        f"<FaultString>{_escape(fault.string, 'FaultString')}</FaultString>"
     )
+    for entry in fault.parameter_faults:
+        details += (
+            "<SetParameterValuesFault>"
+            f"<ParameterName>{_escape(entry.name, 'ParameterName')}</ParameterName>"
+            f"<FaultCode>{int(entry.code)}</FaultCode>"
+            f"<FaultString>{_escape(entry.string, 'FaultString')}</FaultString>"
+            "</SetParameterValuesFault>"
+        )
+    return (
+        f"<soap-env:Fault><faultcode>{fault.faultcode}</faultcode><faultstring>CWMP fault</faultstring>"
+        f"<detail><cwmp:Fault>{details}</cwmp:Fault></detail></soap-env:Fault>"
+    )
+
+
+def encode_envelope(rpc: Rpc | Fault, session: SessionContext) -> bytes:
+    """Encode an RPC call, response or fault as a SOAP 1.1 envelope (TR-069 Amendment 6 Corrigendum 1, 3.5).
+
+    Prefixes are fixed (``soap-env``, ``soap-enc``, ``xsd``, ``xsi``, ``cwmp``) and declared on the root, as
+    the section's own example does; the CWMP namespace is ``session.namespace``, which must match
+    ``urn:dslforum-org:cwmp-1-N``. The result is UTF-8 with an XML declaration. Raises
+    :class:`EncodeError` rather than emit anything the section forbids: a fault in answer to anything
+    but a request, a header Table 4 does not allow from this sender, an anySimpleType without a type, an
+    array member named other than its type, a character XML 1.0 cannot carry.
+    """
+    if not _CWMP_NS.fullmatch(session.namespace):
+        raise EncodeError("the CWMP namespace must be urn:dslforum-org:cwmp-1-N (Annex A.6)")
+    method: str | None
+    if isinstance(rpc, Fault):
+        if session.in_reply_to != "request":
+            raise EncodeError("a fault response answers a SOAP request only (section 3.5)")
+        body = _fault_body(rpc)
+        method = None
+    else:
+        method = _name(rpc.method, "method name")
+        inner = "".join(_arg(arg, 0) for arg in rpc.arguments)
+        body = f"<cwmp:{method}>{inner}</cwmp:{method}>" if inner else f"<cwmp:{method}/>"
+    root = (
+        f'<soap-env:Envelope xmlns:soap-enc="{SOAP_ENC_NS}" xmlns:soap-env="{SOAP_ENV_NS}"'
+        f' xmlns:xsd="{_XSD_NS}" xmlns:xsi="{_XSI_NS}" xmlns:cwmp="{session.namespace}">'
+    )
+    text = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f"{root}{_header(session, method)}<soap-env:Body>{body}</soap-env:Body></soap-env:Envelope>"
+    )
+    return text.encode("utf-8")
 
 
 def _children(element: ET.Element, uri: str, local: str) -> list[ET.Element]:

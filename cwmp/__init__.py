@@ -6,7 +6,19 @@ speak it.
 
 from __future__ import annotations
 
-from . import apps, auth, cli, clock, datamodel, endpoint, envelope, methods, session, transfer
+from . import (
+    apps,
+    auth,
+    cli,
+    clock,
+    datamodel,
+    endpoint,
+    envelope,
+    faults,
+    methods,
+    session,
+    transfer,
+)
 from .auth import digest_challenge
 from .datamodel import coerce_value, resolve_path
 from .endpoint import run_inform
@@ -32,6 +44,7 @@ __all__ = [
     "encode_envelope",
     "endpoint",
     "envelope",
+    "faults",
     "handle_session",
     "methods",
     "resolve_path",

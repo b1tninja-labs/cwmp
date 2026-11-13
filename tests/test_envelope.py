@@ -252,10 +252,3 @@ def test_decode_never_returns_an_empty_envelope():
     for raw in (b"", b"   ", b"<a/>"):
         with pytest.raises(EnvelopeError):
             decode_envelope(raw)
-
-
-def test_encode_is_still_loud():
-    from cwmp.envelope import encode_envelope
-
-    with pytest.raises(NotImplementedError):
-        encode_envelope(None, None)

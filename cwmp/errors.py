@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-__all__ = ["EnvelopeError", "XmlRefused"]
+__all__ = ["EncodeError", "EnvelopeError", "XmlRefused"]
 
 
 class EnvelopeError(ValueError):
     """The bytes are not a valid CWMP SOAP 1.1 envelope (TR-069 Amendment 6 Corrigendum 1, 3.5)."""
+
+
+class EncodeError(ValueError):
+    """The message cannot be encoded without breaking a rule of TR-069 Amendment 6 Corrigendum 1, 3.5."""
 
 
 class XmlRefused(EnvelopeError):  # noqa: N818 - the name matches devicespy.xmlsafe.XmlRefused
