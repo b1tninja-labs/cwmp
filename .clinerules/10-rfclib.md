@@ -5,34 +5,34 @@ paths:
   - "tests/**"
 ---
 
-# Working from the RFC with rfclib
+# Working from the RFC with the rfc_ tools
 
-The `rfclib` MCP server is the authority for what a specification says. Model
-knowledge of RFC numbers and wording is not reliable here, and this portfolio has
-already had to correct numbers that looked right (DHCPv6 is RFC 9915, not 8415;
-RRDP is RFC 8182, not 9183).
+The `rfc_*` tools of the `primarysource` MCP server are the authority for what a
+specification says. Model knowledge of RFC numbers and wording is not reliable
+here, and this portfolio has already had to correct numbers that looked right
+(DHCPv6 is RFC 9915, not 8415; RRDP is RFC 8182, not 9183).
 
-The primary document of this project is TR-069 (CWMP), which is not an RFC, so the `rfclib` calls below resolve only the RFC
+The primary document of this project is TR-069 (CWMP), which is not an RFC, so the `rfc_*` calls below resolve only the RFC
 refs listed under "Section refs for this project"; read the non-RFC
 specification from its own publisher.
 
 Work through the obligations in `ROADMAP.md` one row at a time. For each row:
 
-1. **Confirm the document.** `rfclib.info("RFC9110")` returns status,
+1. **Confirm the document.** `rfc_info("RFC9110")` returns status,
    publication date, the updates/obsoletes graph and an errata summary. If the
    document is obsolete or has a successor, stop and flag the roadmap row before
    writing any code.
-2. **Read the errata.** `rfclib.errata("RFC9110")` gives the verified
+2. **Read the errata.** `rfc_errata("RFC9110")` gives the verified
    corrections with their replacement text. A verified erratum is the
    specification: an implementation that follows the original text is wrong.
    RFC 4795 carries six, RFC 9162 one, RFC 6960 one.
-3. **Pull only the normative statements.** `rfclib.read("RFC9110",
+3. **Pull only the normative statements.** `rfc_read("RFC9110",
    view="normative")` returns the MUST, SHOULD and MAY sentences in that scope.
    Read them before choosing a data structure, not after.
 4. **Find the specific rule instead of guessing its name.**
-   `rfclib.grep("RFC9110", pattern="encode")` searches one document for a
+   `rfc_grep("RFC9110", pattern="encode")` searches one document for a
    field name, ABNF rule or error code, which is cheaper than reading a section.
-5. **Cite rather than paraphrase.** `rfclib.cite("RFC9110",
+5. **Cite rather than paraphrase.** `rfc_cite("RFC9110",
    style="verbose")` yields label, title, date, status, anchor URL and errata
    status. Put that in the docstring or the commit message. Never restate normative
    prose in your own words.
@@ -43,9 +43,9 @@ table like `RFC9162#table-2`. Reads end with `next: <ref>` when the scope exceed
 budget, so page through rather than guessing. Paragraph markers are printed on each
 paragraph so a single one can be quoted exactly.
 
-To decide *which* document applies, `rfclib.search("...", scope="documents")`
+To decide *which* document applies, `rfc_search("...", scope="documents")`
 matches titles and abstracts while `scope="sections"` says which passage answers the
-question. `rfclib.outline("RFC9110", contains="security")` lists sections
+question. `rfc_outline("RFC9110", contains="security")` lists sections
 with their line ranges.
 
 ## Section refs for this project
