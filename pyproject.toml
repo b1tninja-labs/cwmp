@@ -10,7 +10,7 @@ name = "cwmp"
 dynamic = ["version"]
 # The description names the protocol and the documents, because that is the only text
 # a person searching PyPI will read before deciding this is the library they need.
-description = "CWMP remote management: SOAP 1.2 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides"
+description = "CWMP remote management: SOAP 1.1 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -32,7 +32,12 @@ classifiers = [
 ]
 # Empty unless a module cannot be honest without it. Every entry needs a sentence in
 # README.md explaining why the zero-dependency rule was broken for it.
-dependencies = []
+#
+# devicespy is the portfolio's one home for the hardened XML reader (`devicespy.xmlsafe.parse`):
+# every SOAP envelope comes from a peer that is a stranger, and two copies of security-critical
+# parsing is the defect the portfolio forbids. It is not on an index yet, so until it publishes
+# it resolves from the sibling checkout in this workspace, as pkix resolves asn1core.
+dependencies = ["devicespy"]
 
 [project.optional-dependencies]
 dev = [
@@ -68,7 +73,8 @@ include = ["/cwmp/", "/tests/", "/docs/", "/README.md", "/ROADMAP.md", "/CHANGEL
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+# "../devicespy" resolves the XML reader from the sibling checkout until devicespy publishes.
+pythonpath = [".", "../devicespy"]
 asyncio_mode = "auto"
 addopts = "-ra"
 
@@ -91,6 +97,7 @@ exclude_lines = [
 
 [tool.ruff]
 target-version = "py312"
+extend-exclude = [".deps"]
 line-length = 100
 
 [tool.ruff.lint]
@@ -112,6 +119,7 @@ indent-style = "space"
 
 [tool.mypy]
 python_version = "3.12"
+mypy_path = "../devicespy"
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true

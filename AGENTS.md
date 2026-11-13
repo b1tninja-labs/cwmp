@@ -1,6 +1,6 @@
 # Instructions for coding agents
 
-CWMP remote management: SOAP 1.2 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides.
+CWMP remote management: SOAP 1.1 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides.
 
 Primary documents are listed in `docs/rfc-map.md` with statuses and known errata.
 The obligation table in `ROADMAP.md` records what is owed, and `README.md` explains
@@ -54,7 +54,10 @@ rather than merely incomplete.
 3. **Normative text is never paraphrased from memory.** Fetch it with `rfclib` and
    cite the section. If the text you fetch does not say what the obligation claims,
    the obligation is wrong: fix the roadmap row and say so in the commit.
-4. **Dependencies.** `pyproject.toml` here declares no runtime dependencies. Adding a runtime
+4. **Dependencies.** `pyproject.toml` declares one runtime dependency, `devicespy`, for its hardened XML reader
+   (`devicespy.xmlsafe`), resolved from the sibling checkout `../devicespy` until it publishes; see `docs/strategy.md`.
+   Everything else is the standard library, and `cryptography` may be used for cryptographic primitives only.
+   Never add a second XML parser here. Adding any other runtime
    dependency needs a paragraph of justification in `docs/strategy.md` explaining
    why the standard library is not enough.
 5. **Scope.** What is deliberately absent is listed under Non-goals in `README.md`.

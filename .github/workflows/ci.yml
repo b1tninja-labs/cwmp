@@ -13,6 +13,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      # devicespy supplies the hardened XML reader and is not on an index yet (see the comment in
+      # pyproject.toml), so the job installs it from its own repository first. The checkout lands
+      # in .deps/ because actions/checkout refuses a path outside the workspace. When devicespy
+      # publishes, this step and the sibling paths in pyproject.toml come out together.
+      - uses: actions/checkout@v4
+        with:
+          repository: b1tninja/devicespy
+          path: .deps/devicespy
+      - run: python -m pip install --no-deps .deps/devicespy
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
@@ -39,6 +48,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # devicespy supplies the hardened XML reader and is not on an index yet (see the comment in
+      # pyproject.toml), so the job installs it from its own repository first. The checkout lands
+      # in .deps/ because actions/checkout refuses a path outside the workspace. When devicespy
+      # publishes, this step and the sibling paths in pyproject.toml come out together.
+      - uses: actions/checkout@v4
+        with:
+          repository: b1tninja/devicespy
+          path: .deps/devicespy
+      - run: python -m pip install --no-deps .deps/devicespy
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q --cov
       # Asserts stripped: a wire path guarded by assert is unguarded in production.

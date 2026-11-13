@@ -15,8 +15,8 @@ import pytest
 import cwmp as package
 
 SURFACE = [
-    ("envelope", "encode_envelope", "TR-069 Annex 2"),
-    ("envelope", "decode_envelope", "TR-069 Annex 2"),
+    ("envelope", "encode_envelope", "TR-069 Amendment 6 Corrigendum 1"),
+    ("envelope", "decode_envelope", "TR-069 Amendment 6 Corrigendum 1"),
     ("methods", "build_inform", "TR-069"),
     ("methods", "set_parameter_values", "TR-069"),
     ("session", "handle_session", "TR-069, RFC 9110"),

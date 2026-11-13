@@ -28,27 +28,31 @@ which is why the table below carries dates instead of adjectives.
 
 What this project intends to add:
 
-- SOAP 1.2 RPC codec that refuses hostile XML: no DTDs, no external entities, bounded depth
-- CWMP session engine: Inform, RPC method dispatch, fault codes, keep-alive and nonce-based retry
+- SOAP 1.1 RPC codec that refuses hostile XML: no DTDs, no external entities, bounded depth
+- CWMP session engine: Inform, RPC method dispatch, fault codes, keep-alive and the session retry policy
 - HTTP Digest authentication on both sides, since most CPE ship nothing else
 - parameter path tree with wildcards, instance addition and deletion, typed constraints
 - both endpoints: an ACS side that can manage a real device and a CPE side to test against
 
 ## Specification spine
 
-Status and publication dates below were read from the RFC Editor record on 2026-11-05. A
+Status and publication dates below were read from the RFC Editor record on 2026-11-13 and from the Forum's own PDF. A
 section number is cited only where that section was read in full; everything else cites the
 document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/rfc-map.md).
 
 | Document | Status | Published | What it gives this project |
 |---|---|---|---|
-| TR-069 (CWMP) | Broadband Forum | - | the protocol: Inform, Get and SetParameterValues, TransferFile |
-| TR-181 (Device:2) | Broadband Forum | - | the data model object and parameter tree |
-| TR-098 (InternetGatewayDevice) | Broadband Forum | - | the model most deployed CPE still exposes |
-| TR-069 Annex 2 (SOAP) | Broadband Forum | - | the envelope and encoding rules the RPC layer obeys |
-| TR-369 (USP) | Broadband Forum | - | the WebSocket successor; a roadmap target, not a first release |
-| RFC 9110 | Internet Standard (STD 97) | 2022-06 | HTTP semantics under the transport, including authentication |
-| RFC 7616 | Proposed Standard | 2015-09 | HTTP Digest access authentication, which obsoletes RFC 2617 |
+| TR-069 Issue 1 Amendment 6 Corrigendum 1 (June 2020, CWMP 1.4) | Broadband Forum, In Force; supersedes TR-069 Amendment 6. https://www.broadband-forum.org/pdfs/tr-069-1-6-1.pdf, read 2026-11-13 | 2020-06 | the protocol: Inform, RPC methods (Annex A), SOAP use (section 3.5), sessions (3.4), TLS (3.3). The licence allows implementing it but not modifying it, so no text of it is copied here |
+| SOAP 1.1 (W3C Note, 2000-05-08) | the TR's own normative reference [12]; section 3.5 requires its envelope and serialization namespaces | 2000-05-08 | the envelope and encoding rules the RPC layer obeys |
+| TR-181 (Device:2) | Broadband Forum; the amendment used for fixtures is not yet pinned (secondary sources say Amendment 21, unverified) | - | the data model object and parameter tree |
+| TR-098 (InternetGatewayDevice) | Broadband Forum, not re-checked | - | the model most deployed CPE still exposes |
+| TR-369 (USP) | Broadband Forum, not re-checked | - | the WebSocket successor; a roadmap target, not a first release |
+| RFC 9110 | Internet Standard (STD 97), obsoletes RFC 7231 and RFC 7235 | 2022-06 | HTTP semantics under the transport, including authentication |
+| RFC 9112 | Internet Standard (STD 99), obsoletes RFC 7230, updated by RFC 9931 | 2022-06 | HTTP/1.1 message syntax; the TR still cites RFC 7230 and RFC 7231 |
+| RFC 7616 | Proposed Standard, current | 2015-09 | HTTP Digest access authentication, which obsoletes RFC 2617 |
+| RFC 7617 | Proposed Standard, current | 2015-09 | the Basic scheme the TR allows (section 3.4.4) |
+| RFC 6265 | Proposed Standard, current, 5 verified errata | 2011-04 | cookies, which CWMP sessions rely on |
+| RFC 9846 | Proposed Standard, current | 2026-07 | TLS 1.3; obsoletes RFC 8446 and RFC 5246, which the TR cites as its TLS reference |
 
 ### Errata watch
 
@@ -60,7 +64,7 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 
 | Module | Responsibility |
 |---|---|
-| `envelope` | SOAP 1.2 envelope codec with XML hardening (TR-069 Annex 2) |
+| `envelope` | SOAP 1.1 envelope codec with XML hardening (TR-069 section 3.5, Annex A) |
 | `methods` | one class per RPC method, request and response (TR-069) |
 | `session` | ACS session state, authentication and fault handling (TR-069) |
 | `endpoint` | CPE side: inform, connection request, method dispatch (TR-069) |

@@ -42,3 +42,13 @@ One string everywhere: the distribution, the import and the console script. A na
 means one thing in the installer, in `import` and on `PATH` is the only arrangement that
 cannot surprise anyone, and it is also why this project does not sit one edit away from a
 project that already exists.
+
+## Decisions
+
+- **One hardened XML reader (2026-11-13).** `cwmp` does not carry its own XML parser. It declares
+  `devicespy` as a runtime dependency, resolved from the sibling checkout until devicespy
+  publishes (`pythonpath` and `mypy_path` in `pyproject.toml`, a checkout step in CI), and
+  `cwmp.envelope` reads every envelope through `devicespy.xmlsafe.parse`. The standard library
+  alone is enough for the parser; the dependency exists to keep one copy of security-critical code.
+- **SOAP 1.1, not 1.2.** TR-069 Amendment 6 Corrigendum 1, section 3.5, defines SOAP 1.1 as the
+  encoding syntax; a SOAP 1.2 envelope is refused with a reason.

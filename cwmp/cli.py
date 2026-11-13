@@ -17,7 +17,7 @@ Examples:
 def build_parser():
     return argparse.ArgumentParser(
         prog="cwmp",
-        description="CWMP remote management: SOAP 1.2 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides",
+        description="CWMP remote management: SOAP 1.1 RPC codec, session machinery, Digest authentication, parameter path trees and file transfer, ACS and CPE sides",
         epilog=USAGE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
